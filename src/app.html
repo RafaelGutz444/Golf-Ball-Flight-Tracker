@@ -1,0 +1,721 @@
+<title>Fairway Tracer</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+<style>
+/* Layout: one-screen camera app. Stage (video + tracer) fills the top, a control deck sits at the bottom. */
+:root {
+  --bg: #0b100e;
+  --deck: #131a17;
+  --raise: #1c2521;
+  --line: #2a3530;
+  --fg: #e8eee9;
+  --muted: #8d9d94;
+  --tracer: #ff4a2e;
+  --ok: #58d38a;
+  --warn: #f2b84b;
+  --font-display: "Barlow Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  --font-body: Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px;
+  overflow: hidden; -webkit-tap-highlight-color: transparent;
+}
+.app { height: 100%; display: flex; flex-direction: column; }
+.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding-block: 10px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.brand { font-family: var(--font-display); font-weight: 700; font-size: 22px; letter-spacing: 0.04em; text-transform: uppercase; display: flex; align-items: center; gap: 8px; }
+.brand i { width: 22px; height: 3px; background: var(--tracer); border-radius: 2px; box-shadow: 0 0 8px var(--tracer); display: inline-block; transform: rotate(-24deg); }
+.seg { display: flex; background: var(--raise); border-radius: 999px; padding: 3px; gap: 2px; }
+.seg button { border: 0; background: transparent; color: var(--muted); font: 600 13px var(--font-body); padding: 7px 12px; border-radius: 999px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--fg); color: var(--bg); }
+.stage { position: relative; flex: 1 1 auto; min-height: 0; background: #000; overflow: hidden; touch-action: manipulation; }
+#view { width: 100%; height: 100%; display: block; }
+.hud {
+  position: absolute; left: 0; right: 0; top: 0; display: flex; justify-content: center; pointer-events: none;
+  padding: 12px max(16px, env(safe-area-inset-left, 0px)) 0 max(16px, env(safe-area-inset-right, 0px));
+}
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; background: rgba(8, 12, 10, 0.72); backdrop-filter: blur(6px);
+  border: 1px solid rgba(255,255,255,0.08); color: #e8eee9; padding: 7px 13px; border-radius: 999px; font-weight: 600; font-size: 13px;
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill[data-tone="ok"] .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.pill[data-tone="warn"] .dot { background: var(--warn); }
+.pill[data-tone="live"] .dot { background: var(--tracer); box-shadow: 0 0 8px var(--tracer); animation: blink 1s infinite; }
+@keyframes blink { 50% { opacity: 0.3; } }
+.busy { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(5, 8, 7, 0.55); }
+.busy-card { text-align: center; display: grid; gap: 10px; justify-items: center; }
+.bar { width: 180px; height: 4px; background: rgba(255,255,255,0.15); border-radius: 2px; overflow: hidden; }
+.bar b { display: block; height: 100%; width: 0; background: var(--tracer); transition: width 0.15s; }
+.deck {
+  background: var(--deck); border-top: 1px solid var(--line); display: grid; gap: 12px;
+  padding-block: 14px 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.msg { color: var(--muted); line-height: 1.45; max-width: 60ch; }
+.msg strong { color: var(--fg); font-weight: 600; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.btn {
+  appearance: none; border: 1px solid var(--line); background: var(--raise); color: var(--fg); font: 600 15px var(--font-body);
+  padding: 12px 16px; border-radius: 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+}
+.btn.primary { background: var(--tracer); border-color: var(--tracer); color: #fff; }
+.btn.grow { flex: 1 1 140px; justify-content: center; }
+.btn:disabled { opacity: 0.45; cursor: default; }
+.btn:focus-visible, .seg button:focus-visible, .chip:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+input[type="range"] { width: 100%; accent-color: var(--tracer); }
+.stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--line); border-radius: 12px; overflow: hidden; }
+.stat { background: var(--raise); padding: 9px 10px 8px; min-width: 0; }
+.stat .k { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.stat .v { font-family: var(--font-display); font-weight: 600; font-size: 26px; line-height: 1.1; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.stat .v small { font-size: 15px; color: var(--muted); font-weight: 500; margin-left: 2px; }
+.shape { font-family: var(--font-display); font-weight: 700; font-size: 30px; letter-spacing: 0.03em; text-transform: uppercase; color: var(--tracer); line-height: 1; }
+.history { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 2px; }
+.chip { flex: 0 0 auto; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: 8px; padding: 5px 9px; font: 600 12px var(--font-body); cursor: pointer; }
+.chip[aria-current="true"] { color: var(--fg); border-color: var(--fg); }
+details.settings summary { cursor: pointer; color: var(--muted); font-size: 13px; list-style: none; }
+details.settings summary::-webkit-details-marker { display: none; }
+details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
+.setgrid { display: grid; gap: 10px; }
+.setgrid label { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 14px; }
+.swatches { display: flex; gap: 8px; }
+.swatches button { width: 26px; height: 26px; border-radius: 50%; border: 2px solid transparent; cursor: pointer; }
+.swatches button[aria-pressed="true"] { border-color: var(--fg); }
+.file { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.small { font-size: 12px; color: var(--muted); }
+@media (max-width: 380px) { .stat .v { font-size: 22px; } .seg button { padding: 7px 9px; } }
+@media (prefers-reduced-motion: reduce) { .pill[data-tone="live"] .dot { animation: none; } .bar b { transition: none; } }
+</style>
+
+<div class="app">
+  <header class="top">
+    <div class="brand"><i></i>Fairway Tracer</div>
+    <div class="seg" role="group" aria-label="Mode">
+      <button id="modeLive" type="button" aria-pressed="false">Live</button>
+      <button id="modeClip" type="button" aria-pressed="true">Clip</button>
+    </div>
+  </header>
+
+  <div class="stage" id="stage">
+    <canvas id="view"></canvas>
+    <div class="hud"><span class="pill" id="pill" data-tone="idle"><span class="dot"></span><span id="pillText">Ready</span></span></div>
+    <div class="busy" id="busy" hidden>
+      <div class="busy-card"><div id="busyText">Finding the ball…</div><div class="bar"><b id="busyBar"></b></div></div>
+    </div>
+  </div>
+
+  <section class="deck" id="deck">
+    <!-- filled by render() -->
+  </section>
+</div>
+
+<input class="file" id="fileRecord" type="file" accept="video/*" capture="environment">
+<input class="file" id="filePick" type="file" accept="video/*">
+<video id="vid" playsinline muted hidden></video>
+<video id="cam" playsinline muted autoplay hidden></video>
+
+<script id="tracker-src">
+/*TRACKER*/
+</script>
+<script>
+(function () {
+  'use strict';
+  const BT = window.BallTracker;
+  const $ = (id) => document.getElementById(id);
+  const view = $('view'), ctx = view.getContext('2d');
+  const vid = $('vid'), cam = $('cam');
+  const deck = $('deck');
+  const PROC_LONG = 640; // processing resolution, long side
+
+  // ---------- settings ----------
+  const COLORS = { red: '#ff4a2e', yellow: '#ffd23f', blue: '#3fa9ff', white: '#ffffff' };
+  const settings = { handed: 'right', color: 'red', sens: 1 };
+  try { Object.assign(settings, JSON.parse(localStorage.getItem('tracer-settings') || '{}')); } catch (e) {}
+  function saveSettings() { try { localStorage.setItem('tracer-settings', JSON.stringify(settings)); } catch (e) {} }
+  const tracerColor = () => COLORS[settings.color] || COLORS.red;
+
+  // ---------- state ----------
+  const S = {
+    mode: 'clip',          // 'live' | 'clip'
+    step: 'start',         // start | aim | armed | flight | analyzing | result | nocam
+    src: null,             // the element frames come from (cam or vid)
+    ball: null,            // {x,y,r,contrast} in proc coords
+    model: null,
+    det: null,
+    shot: null,            // {points (proc coords), videoT0, stats, clipUrl}
+    shots: [],
+    current: -1,
+    procW: 0, procH: 0,
+    error: '',
+    camStream: null,
+    rec: null, recChunks: [], recT0: 0,
+    clipUrl: null,
+    downloads: undefined,
+  };
+
+  // ---------- helpers ----------
+  const off = document.createElement('canvas');
+  const offCtx = off.getContext('2d', { willReadFrequently: true });
+  function srcSize(el) { return el === cam || el === vid ? [el.videoWidth, el.videoHeight] : [0, 0]; }
+  function setProc(el) {
+    const [w, h] = srcSize(el);
+    const s = PROC_LONG / Math.max(w, h);
+    S.procW = Math.max(2, Math.round(w * s)); S.procH = Math.max(2, Math.round(h * s));
+    off.width = S.procW; off.height = S.procH;
+  }
+  function grabGray(el) {
+    offCtx.drawImage(el, 0, 0, S.procW, S.procH);
+    const d = offCtx.getImageData(0, 0, S.procW, S.procH).data;
+    return BT.toGray(d, new Uint8Array(S.procW * S.procH));
+  }
+  // where the source frame sits inside the canvas (contain)
+  function fit(el) {
+    const [w, h] = srcSize(el);
+    const cw = view.width, ch = view.height;
+    if (!w || !h) return { s: 1, ox: 0, oy: 0, w: 0, h: 0 };
+    const s = Math.min(cw / w, ch / h);
+    return { s, ox: (cw - w * s) / 2, oy: (ch - h * s) / 2, w, h };
+  }
+  function resize() {
+    const r = view.getBoundingClientRect();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    view.width = Math.max(1, Math.round(r.width * dpr));
+    view.height = Math.max(1, Math.round(r.height * dpr));
+  }
+  window.addEventListener('resize', resize);
+  function pill(text, tone) { $('pillText').textContent = text; $('pill').dataset.tone = tone || 'idle'; }
+  function busy(text, frac) {
+    if (text === null) { $('busy').hidden = true; return; }
+    $('busy').hidden = false; $('busyText').textContent = text;
+    $('busyBar').style.width = Math.round((frac || 0) * 100) + '%';
+  }
+
+  // ---------- drawing ----------
+  function drawTracer(c, pts, upto, scale, ox, oy, width) {
+    // pts in proc coords with .tv (video time). Draw up to time `upto` (Infinity = all).
+    const vis = [];
+    for (let i = 0; i < pts.length; i++) {
+      if (pts[i].tv > upto) {
+        if (i > 0) { // interpolate the head
+          const a = pts[i - 1], b = pts[i], f = (upto - a.tv) / Math.max(1e-6, b.tv - a.tv);
+          vis.push({ x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f });
+        }
+        break;
+      }
+      vis.push(pts[i]);
+    }
+    if (vis.length < 2) return;
+    const P = vis.map(p => [ox + p.x * scale, oy + p.y * scale]);
+    const col = tracerColor();
+    c.save();
+    c.lineCap = 'round'; c.lineJoin = 'round';
+    const path = () => {
+      c.beginPath(); c.moveTo(P[0][0], P[0][1]);
+      for (let i = 1; i < P.length - 1; i++) {
+        const mx = (P[i][0] + P[i + 1][0]) / 2, my = (P[i][1] + P[i + 1][1]) / 2;
+        c.quadraticCurveTo(P[i][0], P[i][1], mx, my);
+      }
+      c.lineTo(P[P.length - 1][0], P[P.length - 1][1]);
+    };
+    c.shadowColor = col; c.shadowBlur = width * 4;
+    c.strokeStyle = col; c.globalAlpha = 0.55; c.lineWidth = width * 2.2; path(); c.stroke();
+    c.shadowBlur = width * 2; c.globalAlpha = 1; c.lineWidth = width; path(); c.stroke();
+    c.shadowBlur = 0; c.strokeStyle = 'rgba(255,255,255,0.85)'; c.lineWidth = Math.max(1, width * 0.35); path(); c.stroke();
+    const h = P[P.length - 1];
+    if (upto !== Infinity) {
+      c.fillStyle = '#fff'; c.shadowColor = col; c.shadowBlur = width * 5;
+      c.beginPath(); c.arc(h[0], h[1], width * 0.9, 0, Math.PI * 2); c.fill();
+    }
+    c.restore();
+  }
+  function drawRing(c, x, y, r, col, dash) {
+    c.save(); c.strokeStyle = col; c.lineWidth = 2 * (window.devicePixelRatio > 1 ? 2 : 1);
+    if (dash) c.setLineDash([6, 5]);
+    c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.stroke(); c.restore();
+  }
+
+  let rafId = 0;
+  function frameLoop() {
+    rafId = requestAnimationFrame(frameLoop);
+    const el = S.step === 'result' && S.shot && S.shot.clipUrl ? vid : S.src;
+    ctx.fillStyle = '#000'; ctx.fillRect(0, 0, view.width, view.height);
+    if (!el || !el.videoWidth) { drawPlaceholder(); return; }
+    const f = fit(el);
+    ctx.drawImage(el, f.ox, f.oy, f.w * f.s, f.h * f.s);
+    const k = f.s * (f.w / S.procW); // proc -> canvas
+    if (S.ball && (S.step === 'aim' || S.step === 'armed' || S.step === 'flight')) {
+      const bx = f.ox + S.ball.x * k, by = f.oy + S.ball.y * k;
+      const seen = S.step === 'armed' ? S.ballSeen : true;
+      drawRing(ctx, bx, by, Math.max(14, S.ball.r * k * 3), seen ? COLORS_UI.ok : COLORS_UI.warn, S.step !== 'armed');
+    }
+    if (S.shot && S.step === 'result') {
+      const w = Math.max(3, Math.min(view.width, view.height) * 0.009);
+      const upto = S.shot.clipUrl ? vid.currentTime : Infinity;
+      drawTracer(ctx, S.shot.points, upto, k, f.ox, f.oy, w);
+    }
+  }
+  const COLORS_UI = { ok: '#58d38a', warn: '#f2b84b' };
+  function drawPlaceholder() {
+    // a quiet illustration of what the tracer does, shown before any video is loaded
+    const W = view.width, H = view.height;
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, '#1c2a33'); g.addColorStop(0.62, '#2b3a3c'); g.addColorStop(0.62, '#1d2b1f'); g.addColorStop(1, '#101a12');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    const bx = W * 0.5, by = H * 0.9;
+    const pts = [];
+    for (let i = 0; i <= 60; i++) {
+      const u = i / 60;
+      pts.push({ x: bx + W * 0.12 * u * u, y: by - H * 0.62 * Math.sin(Math.min(1, u * 1.15) * Math.PI * 0.62) / Math.sin(Math.PI * 0.62) + H * 0.25 * Math.max(0, u - 0.7) ** 2, tv: u });
+    }
+    drawTracer(ctx, pts, Infinity, 1, 0, 0, Math.max(3, Math.min(W, H) * 0.009));
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(bx, by, Math.max(3, W * 0.008), 0, Math.PI * 2); ctx.fill();
+  }
+
+  // ---------- deck (bottom controls) ----------
+  function h(html) { deck.innerHTML = html; }
+  function render() {
+    $('modeLive').setAttribute('aria-pressed', S.mode === 'live');
+    $('modeClip').setAttribute('aria-pressed', S.mode === 'clip');
+    const hist = historyHtml();
+    switch (S.step) {
+      case 'start':
+        pill('Ready', 'idle');
+        h(`<p class="msg"><strong>Set your phone behind you on a tripod, pointing down the target line,</strong> with the ball and some sky in view. Record a swing, then tap the ball and the tracer draws its flight.</p>
+          <div class="row"><button class="btn primary grow" id="bRecord">Record a shot</button><button class="btn grow" id="bPick">Choose a video</button></div>
+          ${S.error ? `<p class="small" role="status">${S.error}</p>` : ''}
+          ${hist}${settingsHtml()}`);
+        $('bRecord').onclick = () => $('fileRecord').click();
+        $('bPick').onclick = () => $('filePick').click();
+        break;
+      case 'nocam':
+        pill('Camera unavailable', 'warn');
+        h(`<p class="msg"><strong>Live camera isn't available on this page.</strong> ${S.error || ''} Use Clip mode to record a shot with your camera app instead, or open the hosted version of Fairway Tracer for live tracking.</p>
+          <div class="row"><button class="btn primary grow" id="bToClip">Use Clip mode</button><button class="btn grow" id="bRetry">Try again</button></div>`);
+        $('bToClip').onclick = () => setMode('clip');
+        $('bRetry').onclick = () => setMode('live');
+        break;
+      case 'aim': {
+        pill(S.ball ? 'Ball marked' : 'Tap the ball', S.ball ? 'ok' : 'warn');
+        const clip = S.mode === 'clip';
+        h(`<p class="msg">${clip ? '<strong>Scrub to a moment before the swing</strong> where the ball is clearly visible, then <strong>tap the ball.</strong>' : '<strong>Tap the ball</strong> on screen. Keep the phone still from here on.'}</p>
+          ${clip ? `<input id="scrub" type="range" min="0" max="1000" value="${Math.round((vid.currentTime / (vid.duration || 1)) * 1000)}" aria-label="Position in video">` : ''}
+          <div class="row">
+            <button class="btn primary grow" id="bGo" ${S.ball ? '' : 'disabled'}>${clip ? 'Trace the shot' : 'Ready to hit'}</button>
+            <button class="btn" id="bBack">${clip ? 'Different video' : 'Stop camera'}</button>
+          </div>
+          ${S.error ? `<p class="small" role="status">${S.error}</p>` : ''}`);
+        if (clip) {
+          $('scrub').oninput = (e) => { vid.currentTime = (e.target.value / 1000) * (vid.duration || 0); S.ball = null; $('bGo').disabled = true; pill('Tap the ball', 'warn'); };
+        }
+        $('bGo').onclick = () => (clip ? traceClip() : arm());
+        $('bBack').onclick = () => (clip ? resetClip() : stopCamera());
+        break;
+      }
+      case 'armed':
+        h(`<p class="msg"><strong>Hit when you're ready.</strong> The tracer starts on its own when the ball leaves. Green ring means the ball is in view.</p>
+          <div class="row"><button class="btn grow" id="bReaim">Re-mark the ball</button><button class="btn" id="bStop">Stop camera</button></div>
+          ${hist}`);
+        $('bReaim').onclick = () => { S.step = 'aim'; S.ball = null; render(); };
+        $('bStop').onclick = stopCamera;
+        break;
+      case 'flight':
+        h(`<p class="msg"><strong>Ball's away.</strong> Watching its flight for a few seconds…</p>`);
+        break;
+      case 'analyzing':
+        h(`<p class="msg">Tracing the flight…</p>`);
+        break;
+      case 'result': {
+        const st = S.shot.stats;
+        pill(`Shot ${S.current + 1}`, 'ok');
+        const side = (v) => (Math.abs(v) < 0.5 ? '<small>on line</small>' : `${Math.abs(v).toFixed(1)}°<small>${v > 0 ? 'R' : 'L'}</small>`);
+        h(`<div class="row" style="justify-content:space-between"><div class="shape">${st.shape}</div><div class="small">Camera behind golfer · ${settings.handed}-handed</div></div>
+          <div class="stats">
+            <div class="stat"><div class="k">Start</div><div class="v">${side(st.startDeg)}</div></div>
+            <div class="stat"><div class="k">Curve</div><div class="v">${Math.abs(st.curvePct).toFixed(1)}<small>%${st.curvePct > 0.2 ? ' R' : st.curvePct < -0.2 ? ' L' : ''}</small></div></div>
+            <div class="stat"><div class="k">Apex</div><div class="v">${st.apexPct.toFixed(0)}<small>% frame</small></div></div>
+            <div class="stat"><div class="k">Tracked</div><div class="v">${st.airTime.toFixed(1)}<small>s</small></div></div>
+          </div>
+          <div class="row">
+            <button class="btn primary grow" id="bNext">${S.mode === 'live' ? 'Next shot' : 'New clip'}</button>
+            ${S.shot.clipUrl ? '<button class="btn" id="bReplay">Replay</button><button class="btn" id="bSave">Save video</button>' : ''}
+            <button class="btn" id="bRetrace">Missed it?</button>
+          </div>
+          <p class="small" id="saveMsg" role="status"></p>
+          ${hist}`);
+        $('bNext').onclick = () => (S.mode === 'live' ? nextLive() : resetClip());
+        if (S.shot.clipUrl) { $('bReplay').onclick = replay; $('bSave').onclick = saveVideo; }
+        $('bRetrace').onclick = retrace;
+        bindHistory();
+        break;
+      }
+    }
+    if (S.step === 'start' || S.step === 'armed') bindHistory();
+    bindSettings();
+  }
+
+  function historyHtml() {
+    if (!S.shots.length) return '';
+    return `<div class="history" aria-label="This session">${S.shots.map((s, i) =>
+      `<button class="chip" data-i="${i}" aria-current="${i === S.current && S.step === 'result'}">#${i + 1} ${s.stats.shape}</button>`).join('')}</div>`;
+  }
+  function bindHistory() {
+    deck.querySelectorAll('.chip').forEach(b => b.onclick = () => showShot(+b.dataset.i));
+  }
+  function settingsHtml() {
+    return `<details class="settings"><summary>Settings</summary><div class="setgrid">
+      <label>Golfer <span class="seg" role="group"><button type="button" data-h="right" aria-pressed="${settings.handed === 'right'}">Right</button><button type="button" data-h="left" aria-pressed="${settings.handed === 'left'}">Left</button></span></label>
+      <label>Tracer color <span class="swatches">${Object.entries(COLORS).map(([k, v]) => `<button type="button" aria-label="${k}" data-c="${k}" style="background:${v}" aria-pressed="${settings.color === k}"></button>`).join('')}</span></label>
+      <label>Ball detection <span class="seg" role="group"><button type="button" data-s="1" aria-pressed="${settings.sens === 1}">Normal</button><button type="button" data-s="1.5" aria-pressed="${settings.sens === 1.5}">Sensitive</button></span></label>
+    </div></details>`;
+  }
+  function bindSettings() {
+    deck.querySelectorAll('[data-h]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.handed = b.dataset.h; saveSettings(); render(); deck.querySelector('details').open = true; });
+    deck.querySelectorAll('[data-c]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.color = b.dataset.c; saveSettings(); render(); deck.querySelector('details').open = true; });
+    deck.querySelectorAll('[data-s]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.sens = +b.dataset.s; saveSettings(); render(); deck.querySelector('details').open = true; });
+  }
+
+  // ---------- tapping the ball ----------
+  view.addEventListener('pointerdown', (e) => {
+    if (S.step !== 'aim') return;
+    const el = S.src; if (!el || !el.videoWidth) return;
+    const r = view.getBoundingClientRect();
+    const cx = (e.clientX - r.left) * (view.width / r.width), cy = (e.clientY - r.top) * (view.height / r.height);
+    const f = fit(el); const k = f.s * (f.w / S.procW);
+    const px = (cx - f.ox) / k, py = (cy - f.oy) / k;
+    if (px < 0 || py < 0 || px >= S.procW || py >= S.procH) return;
+    setProc(el);
+    const g = grabGray(el);
+    const ball = BT.refineBall(g, S.procW, S.procH, px, py, Math.round(S.procW * 0.06));
+    S.error = ball.contrast < 18 ? 'That spot doesn\'t stand out much. If the tracer misses, zoom in or tap right on the ball.' : '';
+    S.ball = ball; S.model = BT.makeBallModel(g, S.procW, S.procH, ball);
+    render();
+  });
+
+  // ---------- analysis (in a worker when possible) ----------
+  let worker = null;
+  function getWorker() {
+    if (worker !== null) return worker;
+    try {
+      const src = $('tracker-src').textContent + `
+        self.onmessage = (e) => {
+          const m = e.data;
+          try {
+            const frames = m.frames.map(f => ({ g: new Uint8Array(f.g), t: f.t }));
+            const res = BallTracker.analyze(frames, m.impactIdx, m.W, m.H, m.ball, m.opts);
+            if (res.ok) res.stats = BallTracker.shotStats(res, m.H, m.handed);
+            self.postMessage(res);
+          } catch (err) { self.postMessage({ ok: false, reason: 'error', message: String(err) }); }
+        };`;
+      worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    } catch (e) { worker = false; }
+    return worker;
+  }
+  function analyze(result) {
+    const payload = { impactIdx: result.impactIdx, W: S.procW, H: S.procH, ball: { x: S.ball.x, y: S.ball.y, r: S.ball.r, contrast: S.ball.contrast }, opts: { sensitivity: settings.sens }, handed: settings.handed };
+    const w = getWorker();
+    if (w) {
+      return new Promise((resolve) => {
+        const frames = result.frames.map(f => ({ g: f.g.buffer, t: f.t }));
+        w.onmessage = (e) => resolve(e.data);
+        w.onerror = () => { worker = false; resolve(runHere()); };
+        w.postMessage({ ...payload, frames }, frames.map(f => f.g));
+      });
+    }
+    return Promise.resolve(runHere());
+    function runHere() {
+      const res = BT.analyze(result.frames, result.impactIdx, S.procW, S.procH, payload.ball, payload.opts);
+      if (res.ok) res.stats = BT.shotStats(res, S.procH, settings.handed);
+      return res;
+    }
+  }
+  function keepShot(res, timeOffset, clipUrl) {
+    const points = res.points.map(p => ({ x: p.x, y: p.y, tv: p.t - timeOffset }));
+    // start the line at the ball itself, not at the first airborne sighting
+    points.unshift({ x: S.ball.x, y: S.ball.y, tv: Math.min(points[0].tv - 0.001, res.impactT - timeOffset - 0.5 / (res.fps || 30)) });
+    S.shot = { points, stats: res.stats, clipUrl, impactTv: res.impactT - timeOffset, endTv: points[points.length - 1].tv, ball: { ...S.ball } };
+    S.shots.push(S.shot); S.current = S.shots.length - 1;
+    S.step = 'result';
+  }
+  function showShot(i) {
+    const s = S.shots[i]; if (!s) return;
+    S.shot = s; S.current = i; S.step = 'result';
+    if (s.clipUrl && vid.src !== s.clipUrl) { vid.src = s.clipUrl; vid.onloadeddata = () => replay(); } else if (s.clipUrl) replay();
+    render();
+  }
+  function failMsg(res) {
+    if (res.reason === 'no-impact') return 'I couldn\'t see the ball leave. Make sure the ring is on the ball and the swing is in the clip.';
+    return 'I saw the ball leave but couldn\'t follow it. Try Sensitive detection in Settings, or film with more sky behind the ball.';
+  }
+
+  // ---------- CLIP MODE ----------
+  function onFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    if (S.clipUrl) URL.revokeObjectURL(S.clipUrl);
+    S.clipUrl = URL.createObjectURL(file);
+    vid.src = S.clipUrl; vid.muted = true; vid.playsInline = true;
+    S.error = ''; busy('Loading video…', 0.2);
+    vid.onloadeddata = () => {
+      vid.onloadeddata = null;
+      vid.pause();
+      vid.onseeked = () => { vid.onseeked = null; busy(null); S.src = vid; setProc(vid); S.ball = null; S.step = 'aim'; render(); };
+      vid.currentTime = 0.001;
+    };
+    vid.onerror = () => { busy(null); S.error = 'That video couldn\'t be opened here. Try a shorter clip or a different format.'; S.step = 'start'; render(); };
+    vid.load();
+  }
+  $('fileRecord').addEventListener('change', onFile);
+  $('filePick').addEventListener('change', onFile);
+
+  function resetClip() { vid.pause(); S.src = null; S.ball = null; S.step = 'start'; S.error = ''; render(); }
+
+  async function traceClip() {
+    if (!S.model) return;
+    S.step = 'analyzing'; render();
+    const startT = vid.currentTime;
+    const det = new BT.ShotDetector({ W: S.procW, H: S.procH, model: S.model, postSec: 6 });
+    const dur = vid.duration || 1;
+    busy('Watching the swing…', 0);
+    const result = await new Promise((resolve) => {
+      let finished = false;
+      const finish = () => { if (finished) return; finished = true; vid.pause(); resolve(det.result()); };
+      const take = (t) => {
+        det.push(grabGray(vid), t);
+        busy(det.ballGoneFor > 0.15 ? 'Following the ball…' : 'Watching the swing…', (t - startT) / Math.max(0.1, dur - startT));
+        return det.done;
+      };
+      if ('requestVideoFrameCallback' in vid) {
+        const cb = (now, md) => { if (take(md.mediaTime)) finish(); else if (!finished) vid.requestVideoFrameCallback(cb); };
+        vid.requestVideoFrameCallback(cb);
+        vid.onended = () => setTimeout(finish, 60);
+        vid.playbackRate = 1;
+        vid.play().catch(() => finish());
+      } else {
+        // step through by seeking
+        let t = startT;
+        const step = () => {
+          if (t >= dur) return finish();
+          vid.currentTime = t;
+          vid.onseeked = () => { if (take(t)) return finish(); t += 1 / 30; step(); };
+        };
+        step();
+      }
+    });
+    vid.playbackRate = 1;
+    if (!result.frames.length || result.impactIdx >= result.frames.length - 3) {
+      busy(null); S.step = 'aim'; S.error = failMsg({ reason: 'no-impact' }); render(); return;
+    }
+    busy('Tracing the flight…', 1);
+    S.lastClipRun = { result: cloneRun(result), offset: 0, clipUrl: S.clipUrl };
+    const res = await analyze(result);
+    busy(null);
+    if (!res.ok) { S.step = 'aim'; S.error = failMsg(res); render(); return; }
+    keepShot(res, 0, S.clipUrl);
+    render(); replay();
+  }
+  function cloneRun(r) { return { impactIdx: r.impactIdx, frames: r.frames.map(f => ({ g: f.g.slice(), t: f.t })) }; }
+  async function retrace() {
+    // run again with higher sensitivity on the frames we already have
+    const run = S.lastRun;
+    if (!run) return;
+    settings.sens = settings.sens > 1 ? 2 : 1.5; saveSettings();
+    busy('Looking harder…', 0.5);
+    const res = await analyze(cloneRun(run.result));
+    busy(null);
+    if (!res.ok) { $('saveMsg').textContent = 'Still couldn\'t follow the ball. Filming with more sky behind the ball helps most.'; return; }
+    S.shots.pop();
+    keepShot(res, run.offset, run.clipUrl);
+    render(); if (run.clipUrl) replay();
+  }
+  Object.defineProperty(S, 'lastRun', { get() { return S.mode === 'clip' ? S.lastClipRun : S.lastLiveRun; } });
+
+  function replay() {
+    if (!S.shot || !S.shot.clipUrl) return;
+    const start = Math.max(0, S.shot.impactTv - 1.0);
+    const stopAt = S.shot.endTv + 1.2;
+    vid.playbackRate = 1;
+    vid.currentTime = start;
+    vid.play().catch(() => {});
+    vid.ontimeupdate = () => { if (vid.currentTime >= stopAt) { vid.pause(); vid.ontimeupdate = null; } };
+  }
+
+  // ---------- saving the video with the tracer burned in ----------
+  async function saveVideo() {
+    const msg = $('saveMsg');
+    const shot = S.shot;
+    if (!shot || !shot.clipUrl) return;
+    if (!view.captureStream || !window.MediaRecorder) { msg.textContent = 'This browser can\'t record the tracer video. Try Safari 15+ or Chrome.'; return; }
+    const types = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
+    const type = types.find(t => MediaRecorder.isTypeSupported(t)) || '';
+    const ext = type.includes('mp4') ? 'mp4' : 'webm';
+    const cv = document.createElement('canvas');
+    const vw = vid.videoWidth, vh = vid.videoHeight, sc = Math.min(1, 1280 / Math.max(vw, vh));
+    cv.width = Math.round(vw * sc / 2) * 2; cv.height = Math.round(vh * sc / 2) * 2;
+    const c2 = cv.getContext('2d');
+    const stream = cv.captureStream(30);
+    const rec = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: 6e6 } : undefined);
+    const chunks = [];
+    rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
+    const start = Math.max(0, shot.impactTv - 1.0), stopAt = Math.min(vid.duration || Infinity, shot.endTv + 1.5);
+    msg.textContent = 'Recording the tracer video…';
+    vid.ontimeupdate = null; vid.pause(); vid.currentTime = start;
+    await new Promise(r => { vid.onseeked = () => { vid.onseeked = null; r(); }; });
+    const k = cv.width / S.procW;
+    let raf;
+    const paint = () => {
+      c2.drawImage(vid, 0, 0, cv.width, cv.height);
+      drawTracer(c2, shot.points, vid.currentTime, k, 0, 0, Math.max(3, Math.min(cv.width, cv.height) * 0.009));
+      if (vid.currentTime >= stopAt || vid.ended) { if (window.__tracerDebug) console.log('export stop', vid.currentTime, stopAt, vid.ended, performance.now()); rec.stop(); vid.pause(); return; }
+      raf = requestAnimationFrame(paint);
+    };
+    const done = new Promise(r => rec.onstop = r);
+    rec.start(250); if (window.__tracerDebug) console.log('export start', vid.currentTime, performance.now());
+    await vid.play().catch(() => {});
+    paint();
+    await done; cancelAnimationFrame(raf);
+    const blob = new Blob(chunks, { type: type || 'video/webm' });
+    const name = `tracer-${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.${ext}`;
+    try {
+      if (S.downloads === undefined) S.downloads = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
+    } catch (e) { S.downloads = null; }
+    if (S.downloads) {
+      try { await S.downloads.save({ filename: name, data: blob }); msg.textContent = 'Saved.'; }
+      catch (e) { msg.textContent = e && e.code === 'declined' ? 'Save cancelled.' : 'Saving isn\'t available here.'; }
+    } else {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click(); a.remove();
+      msg.textContent = 'Video ready. Check your downloads.';
+    }
+  }
+
+  // ---------- LIVE MODE ----------
+  async function startCamera() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { S.error = 'This browser doesn\'t offer camera access.'; S.step = 'nocam'; render(); return; }
+    busy('Starting camera…', 0.3);
+    try {
+      S.camStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 60 } },
+      });
+    } catch (e) {
+      busy(null);
+      S.error = e && e.name === 'NotAllowedError' ? 'Camera permission was refused.' : '';
+      S.step = 'nocam'; render(); return;
+    }
+    cam.srcObject = S.camStream;
+    await cam.play().catch(() => {});
+    await new Promise(r => (cam.videoWidth ? r() : (cam.onloadedmetadata = r)));
+    busy(null);
+    try { S.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+    S.src = cam; setProc(cam); S.ball = null; S.step = 'aim'; render();
+    camLoop();
+  }
+  function stopCamera() {
+    if (S.camStream) S.camStream.getTracks().forEach(t => t.stop());
+    S.camStream = null; cam.srcObject = null; stopRec();
+    try { S.wake && S.wake.release(); } catch (e) {}
+    S.src = null; S.ball = null; S.step = 'start'; S.mode = 'clip'; render();
+  }
+  function camLoop() {
+    if (!S.camStream) return;
+    const tick = () => {
+      if (!S.camStream) return;
+      onCamFrame(performance.now() / 1000);
+      if ('requestVideoFrameCallback' in cam) cam.requestVideoFrameCallback(tick); else requestAnimationFrame(tick);
+    };
+    if ('requestVideoFrameCallback' in cam) cam.requestVideoFrameCallback(tick); else requestAnimationFrame(tick);
+  }
+  function onCamFrame(t) {
+    if (S.step !== 'armed' && S.step !== 'flight') return;
+    const g = grabGray(cam);
+    const done = S.det.push(g, t);
+    const last = S.det.frames[S.det.frames.length - 1];
+    S.ballSeen = !!(last && last.present);
+    if (S.step === 'armed') {
+      if (S.det.ballGoneFor > 0.35) { S.step = 'flight'; pill('Ball away · tracking', 'live'); render(); }
+      else pill(S.ballSeen ? 'Ball locked · hit away' : 'Can\'t see the ball', S.ballSeen ? 'ok' : 'warn');
+    } else if (S.step === 'flight' && S.det.ballGoneFor < 0.05) {
+      S.step = 'armed'; render(); // ball came back: it was only blocked
+    }
+    if (done) finishLive();
+  }
+  function arm() {
+    if (!S.model) return;
+    S.det = new BT.ShotDetector({ W: S.procW, H: S.procH, model: S.model, postSec: 5, maxFps: 65 });
+    S.step = 'armed'; S.ballSeen = true; render();
+    startRec();
+  }
+  function startRec() {
+    stopRec();
+    if (!window.MediaRecorder || !S.camStream) return;
+    const types = ['video/mp4', 'video/webm;codecs=vp9', 'video/webm'];
+    const type = types.find(t => MediaRecorder.isTypeSupported(t));
+    try { S.rec = new MediaRecorder(S.camStream, type ? { mimeType: type } : undefined); } catch (e) { S.rec = null; return; }
+    S.recChunks = []; S.recType = type || 'video/webm';
+    S.rec.ondataavailable = (e) => e.data.size && S.recChunks.push(e.data);
+    S.rec.start(500); S.recT0 = performance.now() / 1000;
+    // keep the recording short while waiting: restart every 25 s if the ball is still sitting there
+    clearTimeout(S.recTimer);
+    S.recTimer = setTimeout(() => { if (S.step === 'armed' && S.ballSeen) startRec(); }, 25000);
+  }
+  function stopRec() {
+    clearTimeout(S.recTimer);
+    if (S.rec && S.rec.state !== 'inactive') { try { S.rec.stop(); } catch (e) {} }
+    S.rec = null;
+  }
+  async function finishLive() {
+    S.step = 'analyzing'; render(); busy('Tracing the flight…', 0.6);
+    const result = S.det.result();
+    const recT0 = S.recT0;
+    const clipPromise = new Promise((resolve) => {
+      if (!S.rec) return resolve(null);
+      const rec = S.rec; S.rec = null; clearTimeout(S.recTimer);
+      rec.onstop = () => resolve(S.recChunks.length ? URL.createObjectURL(new Blob(S.recChunks, { type: S.recType })) : null);
+      try { rec.stop(); } catch (e) { resolve(null); }
+    });
+    S.lastLiveRun = { result: cloneRun(result), offset: recT0, clipUrl: null };
+    const [res, clipUrl] = await Promise.all([analyze(result), clipPromise]);
+    busy(null);
+    S.lastLiveRun.clipUrl = clipUrl;
+    if (!res.ok) { S.error = failMsg(res); nextLive(true); return; }
+    keepShot(res, clipUrl ? recT0 : 0, clipUrl);
+    if (clipUrl) { vid.src = clipUrl; vid.onloadeddata = () => replay(); vid.load(); }
+    render();
+  }
+  function nextLive(keepError) {
+    if (!keepError) S.error = '';
+    S.shot = null;
+    // look for a new ball near the last spot
+    const prev = S.ball;
+    S.ball = null; S.step = 'aim';
+    if (prev && cam.videoWidth) {
+      const g = grabGray(cam);
+      const b = BT.refineBall(g, S.procW, S.procH, prev.x, prev.y, Math.round(S.procW * 0.08));
+      if (b.contrast > 25) { S.ball = b; S.model = BT.makeBallModel(g, S.procW, S.procH, b); }
+    }
+    render();
+  }
+
+  // ---------- modes ----------
+  function setMode(m) {
+    if (m === S.mode && S.step !== 'nocam') return;
+    vid.pause();
+    if (m === 'live') { S.mode = 'live'; S.error = ''; startCamera(); }
+    else { if (S.camStream) stopCamera(); S.mode = 'clip'; S.src = null; S.step = 'start'; S.ball = null; render(); }
+  }
+  $('modeLive').onclick = () => setMode('live');
+  $('modeClip').onclick = () => setMode('clip');
+
+  // test hook: lets automated checks drive the app without a real camera
+  window.__tracer = { S, render, onFile, setMode };
+
+  resize(); render(); frameLoop();
+  if (window.__TRACER_DEFAULT === 'live') setMode('live');
+})();
+</script>
