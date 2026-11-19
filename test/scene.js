@@ -20,9 +20,10 @@ function makeShot(p) {
     traj.push({ t, X, Y, Z });
     const v = Math.hypot(vx, vy, vz);
     const kd = 0.0045, kl = p.lift || 0.0040;
-    vx += (-kd * v * vx + (p.curve || 0) * (v / v0)) * dt;
+    const vh = Math.hypot(vx, vz) || 1, side = (p.curve || 0) * (v / v0);
+    vx += (-kd * v * vx + side * vz / vh) * dt;
     vy += (-g - kd * v * vy + kl * v * v * 0.9) * dt;
-    vz += (-kd * v * vz) * dt;
+    vz += (-kd * v * vz - side * vx / vh) * dt;
     X += vx * dt; Y += vy * dt; Z += vz * dt; t += dt;
   }
   return traj;
@@ -36,7 +37,10 @@ function project(P, cam) {
 function renderer(opts) {
   const W = opts.W || 360, H = opts.H || 640, fps = opts.fps || 60;
   const R = rng(opts.seed || 1);
-  const cam = { cx: W * 0.5, hy: H * 0.6, h: 1.5, back: 3, f: 360 * (W / 360) };
+  // phone-like camera: level, horizon mid-frame, ~68 deg across the long side, 1.3 m up, 2.75 m behind the ball
+  const co = opts.cam || {};
+  const cam = { cx: W * 0.5, hy: H * (co.hy || 0.5), h: co.h || 1.3, back: co.back || 2.75, f: (co.f || 0.74) * Math.max(W, H) };
+  const sc = H / 640;
   const ball0 = project({ X: 0, Y: 0, Z: 0 }, cam);
   const bg = new Float32Array(W * H);
   for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
@@ -47,7 +51,7 @@ function renderer(opts) {
   }
   // tree line near the horizon
   for (let x = 0; x < W; x++) {
-    const th = 18 + 12 * Math.sin(x * 0.05) + 6 * Math.sin(x * 0.23);
+    const th = (18 + 12 * Math.sin(x * 0.05 / sc) + 6 * Math.sin(x * 0.23 / sc)) * sc;
     for (let y = Math.round(cam.hy - th); y < cam.hy; y++) bg[y * W + x] = 70 + 10 * R();
   }
   const traj = makeShot(opts.shot || {});
@@ -55,7 +59,7 @@ function renderer(opts) {
   const total = impactT + traj[traj.length - 1].t + 0.6;
   const nFrames = Math.round(total * fps);
   const noise = opts.noise == null ? 2.5 : opts.noise;
-  const hands = { x: ball0.x - 55, y: ball0.y - 120 };
+  const hands = { x: ball0.x - 55 * sc, y: ball0.y - 120 * sc };
 
   function trueBall(t) {
     const ft = t - impactT;
@@ -77,7 +81,7 @@ function renderer(opts) {
         if (dx * dx + dy * dy <= rr * rr) cov++;
       }
       cov /= 16;
-      const w = cov * Math.max(a, 0.55);
+      const w = cov * (alphaMul < 1 ? alphaMul * Math.max(a / alphaMul, 0.55) : Math.max(a, 0.55));
       img[y * W + x] = img[y * W + x] * (1 - w) + val * w;
     }
   }
@@ -95,6 +99,12 @@ function renderer(opts) {
   function frame(k) {
     const t = k / fps;
     const img = Float32Array.from(bg);
+    if (opts.clouds) {
+      for (let y = 0; y < cam.hy - 30; y++) for (let x = 0; x < W; x++) {
+        const u = x * 0.012 + t * 0.05, v = y * 0.02;
+        img[y * W + x] += opts.clouds * (Math.sin(u) * Math.sin(v * 1.3 + u * 0.4) + 0.5 * Math.sin(u * 2.7 + v * 2.1));
+      }
+    }
     // swing phase: address until impactT-1.2, backswing, downswing to impact, follow-through
     const s = t - impactT;
     let ang; // club angle, 0 = pointing at ball
@@ -102,27 +112,31 @@ function renderer(opts) {
     else if (s < -0.25) ang = -2.6 * ((s + 1.0) / 0.75);
     else if (s < 0) ang = -2.6 * (1 - (s + 0.25) / 0.25) ** 1.6;
     else ang = Math.min(3.2, 12 * s);
-    const sway = 6 * Math.sin(Math.min(1, Math.max(0, s + 1)) * Math.PI);
+    const sway = 6 * sc * Math.sin(Math.min(1, Math.max(0, s + 1)) * Math.PI);
     // body
-    for (let y = Math.round(hands.y - 110); y < hands.y + 150; y++) for (let x = Math.round(hands.x - 40 + sway); x < hands.x + 20 + sway; x++) {
-      const ex = (x - (hands.x - 10 + sway)) / 32, ey = (y - (hands.y + 20)) / 130;
+    for (let y = Math.round(hands.y - 110 * sc); y < hands.y + 150 * sc; y++) for (let x = Math.round(hands.x - 40 * sc + sway); x < hands.x + 20 * sc + sway; x++) {
+      const ex = (x - (hands.x - 10 * sc + sway)) / (32 * sc), ey = (y - (hands.y + 20 * sc)) / (130 * sc);
       if (ex * ex + ey * ey < 1 && x >= 0 && y >= 0 && x < W && y < H) img[y * W + x] = 45;
     }
-    disk(img, hands.x - 10 + sway, hands.y - 125, 16, 60, 1);
+    disk(img, hands.x - 10 * sc + sway, hands.y - 125 * sc, 16 * sc, 60, 1);
     // club from hands
     const base = Math.atan2(ball0.y - hands.y, ball0.x - hands.x);
     const len = Math.hypot(ball0.x - hands.x, ball0.y - hands.y) - 4;
     const a = base + ang;
     const hx = hands.x + sway + len * Math.cos(a), hy = hands.y + len * Math.sin(a);
     thickLine(img, hands.x + sway, hands.y, hx, hy, 1, 30);
-    disk(img, hx - 4, hy, 5, 140, 1);
+    disk(img, hx - 4 * sc, hy, 5 * sc, 140, 1);
     // bird distractor
     if (opts.bird) {
       const bx = (40 + 50 * t) % W, by = 120 + 20 * Math.sin(t * 2);
       disk(img, bx, by, 1.3, 60, 1);
     }
-    const b = trueBall(t);
-    if (b) disk(img, b.x, b.y, b.r, opts.ballVal || 245, 1);
+    const nSub = opts.shutter ? 6 : 1;
+    for (let q = 0; q < nSub; q++) {
+      const tq = t - (opts.shutter || 0) * q / Math.max(1, nSub - 1);
+      const b = trueBall(tq);
+      if (b && (tq >= impactT || q === 0)) disk(img, b.x, b.y, b.r, opts.ballVal || 245, 1 / nSub);
+    }
     const out = new Uint8Array(W * H);
     for (let i = 0; i < out.length; i++) {
       const v = img[i] + noise * gauss(R);

@@ -221,7 +221,7 @@
     const sample = [];
     for (let p = 0; p < W * H; p += 37) sample.push(Math.abs(f1[p] - f0[p]));
     const noise = median(sample);
-    const thr = Math.min(40, Math.max(7, 2.5 * noise + 6)) / sens;
+    const thr = Math.min(40, Math.max(8, 2.5 * noise + 6)) / sens;
     const r = ball.r;
     const maxArea = Math.max(40, Math.PI * (2.5 * r) * (2.5 * r)) * Math.max(1, 60 / fps);
     const yMax = ball.y + 3 * r + 2;
@@ -245,7 +245,7 @@
     }
     const T = (i) => frames[i].t;
     // how far the ball can move in one frame right after impact
-    const R1 = Math.max(0.08 * H, Math.min(0.45 * H, 0.25 * H * (30 / fps)));
+    const R1 = Math.max(0.12 * H, Math.min(0.6 * H, 0.4 * H * (30 / fps)));
     const maxGapSec = 0.35;
 
     // Two motion models, because a ball flying away from the camera slows down hard on screen:
@@ -273,7 +273,7 @@
         }
         let found = null;
         for (let j = last.i + 1; j <= endIdx; j++) {
-          if (T(j) - T(last.i) > maxGapSec) break;
+          if (T(j) - T(last.i) > maxGapSec || T(j) - T(impactIdx) > 0.8) break;
           const gap = (T(j) - T(last.i)) * fps;
           let geo = 0, rk = 1;
           const gi = Math.max(1, Math.round(gap));
@@ -315,11 +315,12 @@
       return pen;
     }
 
-    const seedEnd = Math.min(endIdx, impactIdx + Math.max(2, Math.round(0.05 * fps)));
-    let best = null;
+    const seedEnd = Math.min(endIdx, impactIdx + Math.max(2, Math.round(0.1 * fps)));
+    const hyps = [];
     let tries = 0;
     for (let i = impactIdx; i <= seedEnd; i++) {
-      const seeds = cands[i].filter(c => Math.hypot(c.x - ball.x, c.y - ball.y) < R1 && c.y < ball.y + 2 * r)
+      const seedR = R1 * (i - impactIdx + 1);
+      const seeds = cands[i].filter(c => Math.hypot(c.x - ball.x, c.y - ball.y) < seedR && c.y < ball.y + 2 * r)
         .sort((a, b) => b.s - a.s).slice(0, 25);
       for (const s of seeds) {
         // second point: moving up, plausible distance
@@ -341,20 +342,101 @@
           }
           tries++;
           const pts = extend([{ i, x: s.x, y: s.y, err: 0 }, { i: s2.i, x: s2.x, y: s2.y, err: 0 }]);
-          const dur = T(pts[pts.length - 1].i) - T(pts[0].i);
-          const errSum = pts.reduce((a, p) => a + p.err, 0);
-          const rise = ball.y - Math.min(...pts.map(p => p.y));
-          const score = pts.reduce((a, p) => a + (1 - p.err) * (1 - p.err), 0) + 3 * dur + rise / H * 5 - turnPenalty(pts);
-          if (!best || score > best.score) best = { pts, score, dur };
+          const score = pts.slice(0, 10).reduce((a, p) => a + (1 - p.err) * (1 - p.err), 0) - turnPenalty(pts.slice(0, 10));
+          hyps.push({ pts, score });
         }
       }
     }
-    if (!best || best.pts.length < 5 || best.dur < 0.12) {
-      return { ok: false, reason: 'no-track', tries, fps, thr };
+
+    // Fit the flight model to the best-looking early tracks and keep the one it explains best.
+    const tc = T(impactIdx) - 0.5 / fps; // contact happened between the last "ball there" frame and this one
+    const cam = makeCamera(W, H, ball);
+    const pxScale = H / 640 > 1 ? H / 640 : Math.max(W, H) / 640;
+    // Early on a golf ball flies in a nearly straight 3D line, and a straight line stays straight on
+    // screen. So rank tracks by how well their first points line up with the ball's starting spot;
+    // a swinging club or arm traces an arc that doesn't.
+    for (const h of hyps) {
+      const e = h.pts.slice(0, 5);
+      if (e.length < 3) { h.line = Infinity; continue; }
+      const last = e[e.length - 1];
+      const ux = last.x - ball.x, uy = last.y - ball.y, L = Math.hypot(ux, uy) || 1;
+      let dev = 0;
+      for (const p of e) dev += Math.abs(((p.x - ball.x) * uy - (p.y - ball.y) * ux) / L);
+      h.line = dev / e.length / Math.max(1, Math.max(W, H) / 640) - 0.15 * h.pts.slice(0, 10).length;
     }
-    const pts = cleanTrack(best.pts.map(p => ({ x: p.x, y: p.y, t: T(p.i), i: p.i, err: p.err })));
-    if (pts.length < 5) return { ok: false, reason: 'no-track', tries, fps, thr };
-    return { ok: true, points: smooth(pts), raw: pts, impactT: T(impactIdx), fps, thr, tries, ball };
+    hyps.sort((a, b) => a.line - b.line);
+    if (opts.debug) { opts.debug('hyps', hyps.length); for (const h of hyps) if (Math.abs(h.pts[0].x - ball.x) < 15) opts.debug('near-ball hyp', h.score.toFixed(2), h.pts.slice(0, 8).map(p => `${p.i}:${p.x.toFixed(0)},${p.y.toFixed(0)}`).join(' ')); }
+    let best = null;
+    const seen = new Set();
+    const screened = [];
+    for (const h of hyps) {
+      if (seen.size >= 30) break;
+      const key = h.pts.slice(0, 3).map(p => p.i + ':' + Math.round(p.x) + ',' + Math.round(p.y)).join('|');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const early = h.pts.slice(0, 10);
+      if (early.length < 3) continue;
+      // a launched ball keeps getting further from the tee and keeps rising early on
+      let okShape = true;
+      for (let k = 1; k < early.length; k++) {
+        const d0 = Math.hypot(early[k - 1].x - ball.x, early[k - 1].y - ball.y), d1 = Math.hypot(early[k].x - ball.x, early[k].y - ball.y);
+        if (d1 < d0 - 1.5 * pxScale) { okShape = false; break; }
+      }
+      if (!okShape) { if (opts.debug) opts.debug('shape-reject', early.map(p => `${p.i}:${p.x.toFixed(0)},${p.y.toFixed(0)}`).join(' ')); continue; }
+      const obs = early.map(p => ({ t: T(p.i) - tc, x: p.x, y: p.y, i: p.i }));
+      const quick = fitFlight(obs, cam, fps, ball, true);
+      if (quick.rms < 4 * pxScale) screened.push({ obs, quick });
+    }
+    screened.sort((a, b) => (a.quick.rms - a.obs.length * 0.3) - (b.quick.rms - b.obs.length * 0.3));
+    for (const { obs } of screened.slice(0, 4)) {
+      const fit = fitFlight(obs, cam, fps, ball);
+      if (opts.debug) opts.debug('fit', 'rms', fit.rms.toFixed(2), obs.map(o => `${o.t.toFixed(3)}:${o.x.toFixed(0)},${o.y.toFixed(0)}`).join(' '));
+      if (fit.rms > 2.5 * pxScale) continue;
+      const q = obs.length - fit.rms / pxScale;
+      if (!best || q > best.q) best = { q, obs, fit };
+    }
+
+    if (!best) {
+      // We saw the ball leave but not where it went: give a typical flight the user can adjust.
+      const p = { ...DEFAULT_SHOT };
+      return finish(p, [], true);
+    }
+
+    // Look for the ball further along the predicted path and refine the fit with what we find.
+    let obs = best.obs, p = best.fit.p, added = 0;
+    for (let j = obs[obs.length - 1].i + 1; j <= endIdx; j++) {
+      const t = T(j) - tc;
+      if (t > 1.5) break;
+      // the curve can't be seen in the first few frames, so look along a fan of curved paths
+      const gate = (2.5 + 4 * t) * pxScale;
+      let bc = null, bd = gate;
+      for (const dc of [0, -4, 4, -9, 9, -15, 15]) {
+        const pr = predictAt({ ...p, curve: (p.curve || 0) + dc }, cam, [Math.max(0, t + p.dt0)])[0];
+        for (const c of cands[j]) { const d = Math.hypot(c.x - pr.x, c.y - pr.y) + Math.abs(dc) * 0.05; if (d < bd) { bd = d; bc = c; } }
+      }
+      if (!bc) continue;
+      obs.push({ t, x: bc.x, y: bc.y, i: j });
+      if (++added % 4 === 0) {
+        const f = fitFlight(obs, cam, fps, ball, false, p);
+        if (f.rms < 2.5 * pxScale) p = f.p; else { obs.pop(); }
+      }
+    }
+    if (added % 4 !== 0) { const f = fitFlight(obs, cam, fps, ball, false, p); if (f.rms < 2.5 * pxScale) p = f.p; }
+    return finish(p, obs, false);
+
+    function finish(p, obs, estimated) {
+      const fp = flightPath(p, cam, 1 / 60);
+      const toAbs = (t) => tc + t - (p.dt0 || 0);
+      return {
+        ok: true, estimated,
+        points: fp.pts.map(q => ({ x: q.x, y: q.y, t: toAbs(q.t) })),
+        raw: obs.map(o => ({ x: o.x, y: o.y, t: o.t + tc, i: o.i })),
+        seenSec: obs.length ? obs[obs.length - 1].t : 0,
+        params: p, cam, contactT: tc,
+        hang: fp.hang, carry: fp.carry, apexM: fp.apex,
+        impactT: T(impactIdx), fps, thr, tries, ball,
+      };
+    }
   }
 
   // Drop points that don't sit on a smooth path with their neighbours, then cut a ragged tail.
@@ -431,7 +513,148 @@
     };
   }
 
-  const api = { _detect: detectMovers, toGray, refineBall, makeBallModel, ballDiff, ShotDetector, analyze, shotStats, polyFit };
+
+  // ---------------------------------------------------------------------------
+  // Ball flight model. In phone video the ball is only visible for the first
+  // ~0.1-0.5 s, so we fit a simple 3D flight to what we saw and draw the rest.
+  // Camera assumptions: phone roughly level, looking down the target line from
+  // behind the ball, ~68 degrees across the long side of the frame, ~1.3 m up.
+  // ---------------------------------------------------------------------------
+  const PHYS = { g: 9.81, kd: 0.0045, kl: 0.0036 };
+
+  function makeCamera(W, H, ball) {
+    const f = 0.74 * Math.max(W, H), cx = W / 2, hc = 1.3;
+    let yh = H / 2;
+    // distance from the camera to the ball, from how far below the horizon it sits
+    let D = f * hc / Math.max(1, ball.y - yh);
+    if (!(D > 1.2 && D < 8)) { D = Math.min(8, Math.max(1.2, D || 2.75)); yh = ball.y - f * hc / D; }
+    const X0 = (ball.x - cx) * D / f;
+    return { f, cx, yh, hc, D, X0, W, H };
+  }
+
+  function project(cam, X, Y, Z) {
+    const z = Math.max(0.05, Z);
+    return { x: cam.cx + cam.f * X / z, y: cam.yh - cam.f * (Y - cam.hc) / z };
+  }
+
+  // p: {v0 m/s, la deg, dir deg (+ right), curve m/s^2 (+ right), lift multiplier}
+  function simulate(p, cam, tEnd, step, onSample) {
+    const la = p.la * Math.PI / 180, dir = p.dir * Math.PI / 180;
+    let X = cam.X0, Y = 0, Z = cam.D;
+    let vx = p.v0 * Math.cos(la) * Math.sin(dir), vy = p.v0 * Math.sin(la), vz = p.v0 * Math.cos(la) * Math.cos(dir);
+    const dt = 1 / 600, kl = PHYS.kl * (p.lift || 1);
+    let t = 0, nextS = 0, apex = 0;
+    while (t <= tEnd + 1e-9) {
+      if (t >= nextS - 1e-9) { onSample(t, X, Y, Z); nextS += step; }
+      const v = Math.hypot(vx, vy, vz);
+      // sidespin pushes sideways, at right angles to the ball's path, so it bends the flight without speeding it up
+      const vh = Math.hypot(vx, vz) || 1, side = p.curve * (v / Math.max(1, p.v0));
+      vx += (-PHYS.kd * v * vx + side * vz / vh) * dt;
+      vy += (-PHYS.g - PHYS.kd * v * vy + kl * v * v) * dt;
+      vz += (-PHYS.kd * v * vz - side * vx / vh) * dt;
+      X += vx * dt; Y += vy * dt; Z += vz * dt; t += dt;
+      if (Y > apex) apex = Y;
+      if (Y < 0 && t > 0.2) { onSample(t, X, 0, Z); break; }
+    }
+    return { t, X, Z, apex };
+  }
+
+  function flightPath(p, cam, step) {
+    const pts = [];
+    const end = simulate(p, cam, 12, step || 1 / 60, (t, X, Y, Z) => { const q = project(cam, X, Y, Z); pts.push({ t, x: q.x, y: q.y }); });
+    const carry = Math.hypot(end.X - cam.X0, end.Z - cam.D);
+    return { pts, hang: end.t, carry, apex: end.apex };
+  }
+
+  // screen positions at given times since contact
+  function predictAt(p, cam, times) {
+    const out = new Array(times.length);
+    let k = 0;
+    const order = times.map((t, i) => [t, i]).sort((a, b) => a[0] - b[0]);
+    const tEnd = order.length ? order[order.length - 1][0] : 0;
+    let prev = null;
+    simulate(p, cam, tEnd + 1 / 600, 1 / 600, (t, X, Y, Z) => {
+      while (k < order.length && order[k][0] <= t + 1e-9) {
+        const q = project(cam, X, Y, Z);
+        out[order[k][1]] = q; k++;
+      }
+      prev = [X, Y, Z];
+    });
+    while (k < order.length) { const q = prev ? project(cam, prev[0], prev[1], prev[2]) : { x: NaN, y: NaN }; out[order[k][1]] = q; k++; }
+    return out;
+  }
+
+  function nelderMead(fn, x0, steps, iters) {
+    const n = x0.length;
+    let simplex = [x0.slice()];
+    for (let i = 0; i < n; i++) { const x = x0.slice(); x[i] += steps[i]; simplex.push(x); }
+    let vals = simplex.map(fn);
+    for (let it = 0; it < iters; it++) {
+      const idx = vals.map((v, i) => i).sort((a, b) => vals[a] - vals[b]);
+      simplex = idx.map(i => simplex[i]); vals = idx.map(i => vals[i]);
+      if (Math.abs(vals[n] - vals[0]) < 1e-6 * (1 + Math.abs(vals[0]))) break;
+      const c = new Array(n).fill(0);
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) c[j] += simplex[i][j] / n;
+      const ref = c.map((v, j) => v + (v - simplex[n][j]));
+      const fr = fn(ref);
+      if (fr < vals[0]) {
+        const exp = c.map((v, j) => v + 2 * (v - simplex[n][j]));
+        const fe = fn(exp);
+        if (fe < fr) { simplex[n] = exp; vals[n] = fe; } else { simplex[n] = ref; vals[n] = fr; }
+      } else if (fr < vals[n - 1]) { simplex[n] = ref; vals[n] = fr; }
+      else {
+        const con = c.map((v, j) => v + 0.5 * (simplex[n][j] - v));
+        const fc = fn(con);
+        if (fc < vals[n]) { simplex[n] = con; vals[n] = fc; }
+        else {
+          for (let i = 1; i <= n; i++) { simplex[i] = simplex[i].map((v, j) => simplex[0][j] + 0.5 * (v - simplex[0][j])); vals[i] = fn(simplex[i]); }
+        }
+      }
+    }
+    let bi = 0; for (let i = 1; i <= n; i++) if (vals[i] < vals[bi]) bi = i;
+    return { x: simplex[bi], f: vals[bi] };
+  }
+
+  // obs: [{t (since contact estimate), x, y}]. Returns {p, rms, dt0}.
+  function fitFlight(obs, cam, fps, ball, quick, init) {
+    const span = obs.length ? obs[obs.length - 1].t : 0;
+    const fitCurve = span > 0.25;
+    const sig = Math.max(1, 1.2 * cam.H / 640);
+    const half = 0.5 / fps;
+    const unpack = (q) => ({ v0: q[0], la: q[1], dir: q[2], curve: fitCurve ? q[3] : 0, lift: 1, dt0: q[4] });
+    const cost = (q) => {
+      const p = unpack(q);
+      let c = 0;
+      if (p.v0 < 15 || p.v0 > 90 || p.la < 1 || p.la > 45 || Math.abs(p.dir) > 30 || Math.abs(p.dt0) > 2 * half) c += 1e6;
+      const pr = predictAt(p, cam, obs.map(o => Math.max(0, o.t + p.dt0)));
+      for (let i = 0; i < obs.length; i++) {
+        const dx = (pr[i].x - obs[i].x) / sig, dy = (pr[i].y - obs[i].y) / sig;
+        const e2 = dx * dx + dy * dy;
+        c += e2 < 9 ? e2 : 6 * Math.sqrt(e2) - 9; // robust beyond 3 sigma
+      }
+      c += ((p.v0 - 58) / 22) ** 2 + ((p.la - 14) / 9) ** 2 + (p.dir / 15) ** 2 + (fitCurve ? (q[3] / 8) ** 2 : 0) + (p.dt0 / half) ** 2;
+      return c;
+    };
+    // starting guess for direction from the first sighting
+    const o0 = obs[Math.min(obs.length - 1, 1)] || { x: ball.x, y: ball.y };
+    const dirGuess = Math.max(-20, Math.min(20, Math.atan2(o0.x - ball.x, Math.max(1, ball.y - o0.y)) * 180 / Math.PI * 0.6));
+    let best = null;
+    if (init) best = nelderMead(cost, [init.v0, init.la, init.dir, init.curve || 0, init.dt0 || 0], [4, 2, 1.5, 1.5, half / 2], 250);
+    else for (const v0 of quick ? [60] : [40, 60, 75]) for (const la of [9, 15, 24]) {
+      const r = nelderMead(cost, [v0, la, dirGuess, 0, 0], [8, 4, 3, 2, half], quick ? 120 : 220);
+      if (!best || r.f < best.f) best = r;
+    }
+    const r = quick ? best : nelderMead(cost, best.x, [3, 1.5, 1, 1, half / 2], 300);
+    const p = unpack(r.x);
+    const pr = predictAt(p, cam, obs.map(o => Math.max(0, o.t + p.dt0)));
+    let se = 0;
+    for (let i = 0; i < obs.length; i++) se += (pr[i].x - obs[i].x) ** 2 + (pr[i].y - obs[i].y) ** 2;
+    return { p, rms: Math.sqrt(se / Math.max(1, obs.length)), cost: r.f };
+  }
+
+  const DEFAULT_SHOT = { v0: 58, la: 14, dir: 0, curve: 0, lift: 1, dt0: 0 };
+
+  const api = { Flight: { makeCamera, project, simulate, flightPath, predictAt, fitFlight, DEFAULT_SHOT, PHYS }, _detect: detectMovers, toGray, refineBall, makeBallModel, ballDiff, ShotDetector, analyze, shotStats, polyFit };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.BallTracker = api;
 })(typeof self !== 'undefined' ? self : this);

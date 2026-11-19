@@ -25,7 +25,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node test/run-sim.js
+      - run: node test/run-sim.js && node test/run-real.js
       - run: node build.js && mkdir -p site && cp dist/index.html site/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
