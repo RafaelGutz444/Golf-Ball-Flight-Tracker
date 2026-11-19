@@ -55,6 +55,7 @@ body {
 .bar b { display: block; height: 100%; width: 0; background: var(--tracer); transition: width 0.15s; }
 .deck {
   background: var(--deck); border-top: 1px solid var(--line); display: grid; gap: 12px;
+  max-height: 50%; overflow-y: auto; overscroll-behavior: contain; flex: 0 0 auto;
   padding-block: 14px 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
 }
 .msg { color: var(--muted); line-height: 1.45; max-width: 60ch; }
@@ -255,8 +256,14 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
     }
     if (S.shot && S.step === 'result') {
       const w = Math.max(3, Math.min(view.width, view.height) * 0.009);
-      const upto = S.shot.clipUrl ? vid.currentTime : Infinity;
+      const upto = S.shot.clipUrl ? clipClock() : Infinity;
       drawTracer(ctx, S.shot.points, upto, k, f.ox, f.oy, w);
+      if (settings.debug) {
+        // the actual ball sightings the flight was fitted to
+        ctx.save(); ctx.fillStyle = '#3fa9ff'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1;
+        for (const q of S.shot.raw) { ctx.beginPath(); ctx.arc(f.ox + q.x * k, f.oy + q.y * k, Math.max(2.5, w * 0.6), 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+        ctx.restore();
+      }
     }
   }
   const COLORS_UI = { ok: '#58d38a', warn: '#f2b84b' };
@@ -324,22 +331,25 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
         $('bStop').onclick = stopCamera;
         break;
       case 'flight':
-        h(`<p class="msg"><strong>Ball's away.</strong> Watching its flight for a few seconds…</p>`);
+        h(`<p class="msg"><strong>Ball's away.</strong> Reading the launch…</p>`);
         break;
       case 'analyzing':
         h(`<p class="msg">Tracing the flight…</p>`);
         break;
       case 'result': {
-        const st = S.shot.stats;
-        pill(`Shot ${S.current + 1}`, 'ok');
-        const side = (v) => (Math.abs(v) < 0.5 ? '<small>on line</small>' : `${Math.abs(v).toFixed(1)}°<small>${v > 0 ? 'R' : 'L'}</small>`);
-        h(`<div class="row" style="justify-content:space-between"><div class="shape">${st.shape}</div><div class="small">Camera behind golfer · ${settings.handed}-handed</div></div>
-          <div class="stats">
-            <div class="stat"><div class="k">Start</div><div class="v">${side(st.startDeg)}</div></div>
-            <div class="stat"><div class="k">Curve</div><div class="v">${Math.abs(st.curvePct).toFixed(1)}<small>%${st.curvePct > 0.2 ? ' R' : st.curvePct < -0.2 ? ' L' : ''}</small></div></div>
-            <div class="stat"><div class="k">Apex</div><div class="v">${st.apexPct.toFixed(0)}<small>% frame</small></div></div>
-            <div class="stat"><div class="k">Tracked</div><div class="v">${st.airTime.toFixed(1)}<small>s</small></div></div>
-          </div>
+        const shot = S.shot, st = shot.stats;
+        pill(shot.estimated ? `Shot ${S.current + 1} · estimated` : `Shot ${S.current + 1}`, shot.estimated ? 'warn' : 'ok');
+        const seen = shot.estimated
+          ? '<strong>I saw the ball leave but not where it went,</strong> so this is a typical flight. Use Adjust to match what you saw. Carry and apex are estimates.'
+          : `Ball seen for ${shot.seenSec.toFixed(2)} s; the rest is a fitted flight, and carry and apex are estimates. Use Adjust if the line is off.`;
+        h(`<div class="row" style="justify-content:space-between"><div class="shape" id="shape">${st.shape}</div><div class="small">Camera behind golfer · ${settings.handed}-handed</div></div>
+          <div class="stats" id="stats">${statsHtml(st)}</div>
+          <p class="small">${seen}</p>
+          <details class="settings" id="adjust"><summary>Adjust tracer</summary><div class="setgrid">
+            ${SLIDERS.map(sl => `<div><label for="adj-${sl.k}">${sl.label} <span class="small" id="adjv-${sl.k}">${sl.fmt(shot.params[sl.k])}</span></label>
+              <input type="range" id="adj-${sl.k}" min="${sl.min}" max="${sl.max}" step="${sl.step}" value="${shot.params[sl.k]}"></div>`).join('')}
+            <div class="row"><button class="btn" id="bResetAdj" type="button">Reset to fitted</button></div>
+          </div></details>
           <div class="row">
             <button class="btn primary grow" id="bNext">${S.mode === 'live' ? 'Next shot' : 'New clip'}</button>
             ${S.shot.clipUrl ? '<button class="btn" id="bReplay">Replay</button><button class="btn" id="bSave">Save video</button>' : ''}
@@ -350,6 +360,16 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
         $('bNext').onclick = () => (S.mode === 'live' ? nextLive() : resetClip());
         if (S.shot.clipUrl) { $('bReplay').onclick = replay; $('bSave').onclick = saveVideo; }
         $('bRetrace').onclick = retrace;
+        SLIDERS.forEach(sl => {
+          $('adj-' + sl.k).oninput = (e) => {
+            shot.params[sl.k] = +e.target.value;
+            recompute(shot);
+            $('adjv-' + sl.k).textContent = sl.fmt(shot.params[sl.k]);
+            $('stats').innerHTML = statsHtml(shot.stats); $('shape').textContent = shot.stats.shape;
+          };
+          $('adj-' + sl.k).onchange = () => { if (shot.clipUrl) replay(); };
+        });
+        $('bResetAdj').onclick = () => { shot.params = { ...shot.fitted }; recompute(shot); render(); $('adjust').open = true; if (shot.clipUrl) replay(); };
         bindHistory();
         break;
       }
@@ -370,12 +390,14 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
     return `<details class="settings"><summary>Settings</summary><div class="setgrid">
       <label>Golfer <span class="seg" role="group"><button type="button" data-h="right" aria-pressed="${settings.handed === 'right'}">Right</button><button type="button" data-h="left" aria-pressed="${settings.handed === 'left'}">Left</button></span></label>
       <label>Tracer color <span class="swatches">${Object.entries(COLORS).map(([k, v]) => `<button type="button" aria-label="${k}" data-c="${k}" style="background:${v}" aria-pressed="${settings.color === k}"></button>`).join('')}</span></label>
+      <label>Show what the camera saw <span class="seg" role="group"><button type="button" data-d="0" aria-pressed="${!settings.debug}">Off</button><button type="button" data-d="1" aria-pressed="${!!settings.debug}">On</button></span></label>
       <label>Ball detection <span class="seg" role="group"><button type="button" data-s="1" aria-pressed="${settings.sens === 1}">Normal</button><button type="button" data-s="1.5" aria-pressed="${settings.sens === 1.5}">Sensitive</button></span></label>
     </div></details>`;
   }
   function bindSettings() {
     deck.querySelectorAll('[data-h]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.handed = b.dataset.h; saveSettings(); render(); deck.querySelector('details').open = true; });
     deck.querySelectorAll('[data-c]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.color = b.dataset.c; saveSettings(); render(); deck.querySelector('details').open = true; });
+    deck.querySelectorAll('[data-d]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.debug = b.dataset.d === '1'; saveSettings(); render(); deck.querySelector('details').open = true; });
     deck.querySelectorAll('[data-s]').forEach(b => b.onclick = (e) => { e.preventDefault(); settings.sens = +b.dataset.s; saveSettings(); render(); deck.querySelector('details').open = true; });
   }
 
@@ -407,7 +429,6 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
           try {
             const frames = m.frames.map(f => ({ g: new Uint8Array(f.g), t: f.t }));
             const res = BallTracker.analyze(frames, m.impactIdx, m.W, m.H, m.ball, m.opts);
-            if (res.ok) res.stats = BallTracker.shotStats(res, m.H, m.handed);
             self.postMessage(res);
           } catch (err) { self.postMessage({ ok: false, reason: 'error', message: String(err) }); }
         };`;
@@ -429,18 +450,46 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
     return Promise.resolve(runHere());
     function runHere() {
       const res = BT.analyze(result.frames, result.impactIdx, S.procW, S.procH, payload.ball, payload.opts);
-      if (res.ok) res.stats = BT.shotStats(res, S.procH, settings.handed);
       return res;
     }
   }
+  // The tracer is a fitted ball flight: what the camera saw pins down the launch, the model draws the rest.
   function keepShot(res, timeOffset, clipUrl) {
-    const points = res.points.map(p => ({ x: p.x, y: p.y, tv: p.t - timeOffset }));
-    // start the line at the ball itself, not at the first airborne sighting
-    points.unshift({ x: S.ball.x, y: S.ball.y, tv: Math.min(points[0].tv - 0.001, res.impactT - timeOffset - 0.5 / (res.fps || 30)) });
-    S.shot = { points, stats: res.stats, clipUrl, impactTv: res.impactT - timeOffset, endTv: points[points.length - 1].tv, ball: { ...S.ball } };
+    const shot = {
+      params: { ...res.params }, fitted: { ...res.params }, cam: res.cam, estimated: !!res.estimated,
+      contactTv: res.contactT - timeOffset, impactTv: res.impactT - timeOffset,
+      raw: (res.raw || []).map(p => ({ x: p.x, y: p.y, tv: p.t - timeOffset })), seenSec: res.seenSec || 0,
+      clipUrl, ball: { ...S.ball },
+    };
+    recompute(shot);
+    S.shot = shot;
     S.shots.push(S.shot); S.current = S.shots.length - 1;
     S.step = 'result';
   }
+  function recompute(shot) {
+    const fp = BT.Flight.flightPath(shot.params, shot.cam, 1 / 60);
+    const off = shot.contactTv - (shot.params.dt0 || 0);
+    shot.points = fp.pts.map(q => ({ x: q.x, y: q.y, tv: off + q.t }));
+    shot.endTv = shot.points[shot.points.length - 1].tv;
+    const p = shot.params, side = settings.handed === 'left' ? -1 : 1, c = p.curve * side;
+    let shape = 'Straight';
+    if (c > 1.5) shape = c > 5 ? 'Slice' : 'Fade';
+    else if (c < -1.5) shape = c < -5 ? 'Hook' : 'Draw';
+    shot.stats = { shape, startDeg: p.dir, curve: p.curve, carryYd: fp.carry * 1.0936, apexFt: fp.apex * 3.281, hang: fp.hang, speedMph: p.v0 * 2.237, launch: p.la };
+  }
+  function statsHtml(st) {
+    const side = (v) => (Math.abs(v) < 0.5 ? '<small>on line</small>' : `${Math.abs(v).toFixed(1)}°<small>${v > 0 ? 'R' : 'L'}</small>`);
+    return `<div class="stat"><div class="k">Start</div><div class="v">${side(st.startDeg)}</div></div>
+      <div class="stat"><div class="k">Carry</div><div class="v">${Math.round(st.carryYd)}<small>yd</small></div></div>
+      <div class="stat"><div class="k">Apex</div><div class="v">${Math.round(st.apexFt)}<small>ft</small></div></div>
+      <div class="stat"><div class="k">Hang</div><div class="v">${st.hang.toFixed(1)}<small>s</small></div></div>`;
+  }
+  const SLIDERS = [
+    { k: 'dir', label: 'Start line', min: -15, max: 15, step: 0.5, fmt: (v) => (Math.abs(v) < 0.25 ? 'on line' : `${Math.abs(v).toFixed(1)}° ${v > 0 ? 'right' : 'left'}`) },
+    { k: 'curve', label: 'Curve', min: -15, max: 15, step: 0.5, fmt: (v) => (Math.abs(v) < 0.25 ? 'none' : `${Math.abs(v).toFixed(1)} ${v > 0 ? 'right' : 'left'}`) },
+    { k: 'la', label: 'Height', min: 3, max: 35, step: 0.5, fmt: (v) => `${v.toFixed(1)}° launch` },
+    { k: 'v0', label: 'Distance', min: 20, max: 85, step: 0.5, fmt: (v) => `${Math.round(v * 2.237)} mph ball speed` },
+  ];
   function showShot(i) {
     const s = S.shots[i]; if (!s) return;
     S.shot = s; S.current = i; S.step = 'result';
@@ -449,7 +498,7 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
   }
   function failMsg(res) {
     if (res.reason === 'no-impact') return 'I couldn\'t see the ball leave. Make sure the ring is on the ball and the swing is in the clip.';
-    return 'I saw the ball leave but couldn\'t follow it. Try Sensitive detection in Settings, or film with more sky behind the ball.';
+    return 'Something went wrong tracing that shot. Try again, or try Sensitive detection in Settings.';
   }
 
   // ---------- CLIP MODE ----------
@@ -479,7 +528,7 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
     if (!S.model) return;
     S.step = 'analyzing'; render();
     const startT = vid.currentTime;
-    const det = new BT.ShotDetector({ W: S.procW, H: S.procH, model: S.model, postSec: 6 });
+    const det = new BT.ShotDetector({ W: S.procW, H: S.procH, model: S.model, postSec: 1.5 });
     const dur = vid.duration || 1;
     busy('Watching the swing…', 0);
     const result = await new Promise((resolve) => {
@@ -535,6 +584,15 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
   }
   Object.defineProperty(S, 'lastRun', { get() { return S.mode === 'clip' ? S.lastClipRun : S.lastLiveRun; } });
 
+  // Video time, carried on past the end of the clip so the tracer can finish over the last frame.
+  let endedAt = null;
+  vid.addEventListener('ended', () => { endedAt = { wall: performance.now(), t: vid.currentTime }; });
+  vid.addEventListener('play', () => { endedAt = null; });
+  vid.addEventListener('seeking', () => { endedAt = null; });
+  function clipClock() {
+    if (endedAt) return endedAt.t + (performance.now() - endedAt.wall) / 1000;
+    return vid.currentTime;
+  }
   function replay() {
     if (!S.shot || !S.shot.clipUrl) return;
     const start = Math.max(0, S.shot.impactTv - 1.0);
@@ -562,7 +620,7 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
     const rec = new MediaRecorder(stream, type ? { mimeType: type, videoBitsPerSecond: 6e6 } : undefined);
     const chunks = [];
     rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
-    const start = Math.max(0, shot.impactTv - 1.0), stopAt = Math.min(vid.duration || Infinity, shot.endTv + 1.5);
+    const start = Math.max(0, shot.impactTv - 1.0), stopAt = shot.endTv + 1.0;
     msg.textContent = 'Recording the tracer video…';
     vid.ontimeupdate = null; vid.pause(); vid.currentTime = start;
     await new Promise(r => { vid.onseeked = () => { vid.onseeked = null; r(); }; });
@@ -570,8 +628,9 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
     let raf;
     const paint = () => {
       c2.drawImage(vid, 0, 0, cv.width, cv.height);
-      drawTracer(c2, shot.points, vid.currentTime, k, 0, 0, Math.max(3, Math.min(cv.width, cv.height) * 0.009));
-      if (vid.currentTime >= stopAt || vid.ended) { if (window.__tracerDebug) console.log('export stop', vid.currentTime, stopAt, vid.ended, performance.now()); rec.stop(); vid.pause(); return; }
+      const now = clipClock();
+      drawTracer(c2, shot.points, now, k, 0, 0, Math.max(3, Math.min(cv.width, cv.height) * 0.009));
+      if (now >= stopAt) { if (window.__tracerDebug) console.log('export stop', vid.currentTime, stopAt, vid.ended, performance.now()); rec.stop(); vid.pause(); return; }
       raf = requestAnimationFrame(paint);
     };
     const done = new Promise(r => rec.onstop = r);
@@ -647,7 +706,7 @@ details.settings[open] summary { color: var(--fg); margin-bottom: 10px; }
   }
   function arm() {
     if (!S.model) return;
-    S.det = new BT.ShotDetector({ W: S.procW, H: S.procH, model: S.model, postSec: 5, maxFps: 65 });
+    S.det = new BT.ShotDetector({ W: S.procW, H: S.procH, model: S.model, postSec: 1.5, maxFps: 65 });
     S.step = 'armed'; S.ballSeen = true; render();
     startRec();
   }
